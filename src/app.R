@@ -96,49 +96,140 @@ plot_boxplots <- function(data) {
   return(list(p1 = p1, p2 = p2, p3 = p3, p4 = p4))
 }
 
+# Function to plot all strategies equity lines
+plot_all_strategies <- function(all_equity_lines) {
+  all_equity <- bind_rows(all_equity_lines, .id = "Strategy")
+  plot <- ggplot(all_equity, aes(x = entryTime, y = equity, color = Strategy)) +
+    geom_line() +
+    labs(title = "Equity Line by Strategy",
+         x = "Entry Time",
+         y = "Equity")
+  return(plot)
+}
+
 # Shiny UI
 ui <- fluidPage(
   titlePanel("Portfolio Performance Report"),
   sidebarLayout(
     sidebarPanel(
-      fileInput("file", "Choose CSV File", accept = ".csv")
-    ),
-    mainPanel(
       tabsetPanel(
-        tabPanel("Equity Line", plotOutput("equityPlot")),
-        tabPanel("Profit and Duration Boxplots", 
+        tabPanel("Import",
+                 fileInput("files", "Choose CSV Files", multiple = TRUE, accept = ".csv"),
+                 actionButton("clear_all", "Clear All"),
+                 uiOutput("file_list")),
+        tabPanel("Equity Line",
+                 selectInput("selected_file", "Select File", choices = NULL),
+                 plotOutput("equityPlot")),
+        tabPanel("Profit and Duration Boxplots",
+                 selectInput("selected_file2", "Select File", choices = NULL),
                  plotOutput("profitEntryBoxplot"),
                  plotOutput("profitExitBoxplot"),
                  plotOutput("durationEntryBoxplot"),
                  plotOutput("durationExitBoxplot")),
-        tabPanel("Linearity Metrics", tableOutput("linearityTable"))
+        tabPanel("Linearity Metrics",
+                 selectInput("selected_file3", "Select File", choices = NULL),
+                 tableOutput("linearityTable")),
+        tabPanel("Strategy Comparison",
+                 plotOutput("allStrategiesPlot"))
       )
-    )
+    ),
+    mainPanel()
   )
 )
 
 # Shiny Server
-server <- function(input, output) {
-  data <- reactive({
-    req(input$file)
-    load_data(input$file$datapath)
+server <- function(input, output, session) {
+  # Reactive value to store uploaded files
+  uploaded_files <- reactiveValues(data = list())
+  
+  observeEvent(input$files, {
+    req(input$files)
+    for (i in 1:nrow(input$files)) {
+      file <- input$files[i,]
+      file_data <- load_data(file$datapath)
+      uploaded_files$data[[file$name]] <- preprocess_data(file_data)
+    }
+    updateSelectInput(session, "selected_file", choices = names(uploaded_files$data))
+    updateSelectInput(session, "selected_file2", choices = names(uploaded_files$data))
+    updateSelectInput(session, "selected_file3", choices = names(uploaded_files$data))
   })
   
-  processed_data <- reactive({
-    preprocess_data(data())
+  observeEvent(input$clear_all, {
+    uploaded_files$data <- list()
+    updateSelectInput(session, "selected_file", choices = NULL)
+    updateSelectInput(session, "selected_file2", choices = NULL)
+    updateSelectInput(session, "selected_file3", choices = NULL)
+  })
+  
+  output$file_list <- renderUI({
+    req(names(uploaded_files$data))
+    tagList(
+      lapply(names(uploaded_files$data), function(name) {
+        actionButton(inputId = paste0("remove_", name), label = paste("Remove", name))
+      })
+    )
+  })
+  
+  observe({
+    lapply(names(uploaded_files$data), function(name) {
+      observeEvent(input[[paste0("remove_", name)]], {
+        uploaded_files$data[[name]] <- NULL
+        uploaded_files$data <- uploaded_files$data[!sapply(uploaded_files$data, is.null)]
+        updateSelectInput(session, "selected_file", choices = names(uploaded_files$data))
+        updateSelectInput(session, "selected_file2", choices = names(uploaded_files$data))
+        updateSelectInput(session, "selected_file3", choices = names(uploaded_files$data))
+      })
+    })
+  })
+  
+  selected_data <- reactive({
+    req(input$selected_file)
+    uploaded_files$data[[input$selected_file]]
+  })
+  
+  selected_data2 <- reactive({
+    req(input$selected_file2)
+    uploaded_files$data[[input$selected_file2]]
+  })
+  
+  selected_data3 <- reactive({
+    req(input$selected_file3)
+    uploaded_files$data[[input$selected_file3]]
   })
   
   metrics_data <- reactive({
-    compute_metrics(processed_data())
+    compute_metrics(selected_data())
+  })
+  
+  metrics_data2 <- reactive({
+    compute_metrics(selected_data2())
+  })
+  
+  metrics_data3 <- reactive({
+    compute_metrics(selected_data3())
   })
   
   equity_lines <- reactive({
     compute_equity_lines(metrics_data())
   })
   
+  equity_lines2 <- reactive({
+    compute_equity_lines(metrics_data2())
+  })
+  
+  equity_lines3 <- reactive({
+    compute_equity_lines(metrics_data3())
+  })
+  
   linearity_metrics <- reactive({
-    equity_data <- equity_lines()
+    equity_data <- equity_lines3()
     compute_linearity_metrics(equity_data$equity_by_signal, equity_data$overall_equity)
+  })
+  
+  all_equity_lines <- reactive({
+    lapply(uploaded_files$data, function(data) {
+      compute_equity_lines(compute_metrics(data))$overall_equity
+    })
   })
   
   output$equityPlot <- renderPlot({
@@ -147,7 +238,7 @@ server <- function(input, output) {
   })
   
   boxplots <- reactive({
-    plot_boxplots(metrics_data())
+    plot_boxplots(metrics_data2())
   })
   
   output$profitEntryBoxplot <- renderPlot({
@@ -168,6 +259,10 @@ server <- function(input, output) {
   
   output$linearityTable <- renderTable({
     linearity_metrics()
+  })
+  
+  output$allStrategiesPlot <- renderPlot({
+    plot_all_strategies(all_equity_lines())
   })
 }
 
