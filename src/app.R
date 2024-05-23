@@ -25,7 +25,8 @@ preprocess_data <- function(data) {
 compute_metrics <- function(data) {
   data <- data %>%
     mutate(duration = as.numeric(difftime(exitTime, entryTime, units = "weeks")),
-           profitable = profit > 0)
+           profitable = ifelse(profit>0,1,0)) %>%
+    na.omit()  # Remove rows with NA values
   return(data)
 }
 
@@ -45,15 +46,19 @@ compute_equity_lines <- function(data) {
 
 # Function to compute linearity metrics
 compute_linearity_metrics <- function(equity_by_signal, overall_equity) {
-  linearity_metrics <- equity_by_signal %>% 
-    group_by(entrySignal) %>% 
-    do({
-      model <- lm(equity ~ as.numeric(entryTime), data = .)
-      predictions <- predict(model, newdata = .)
-      mse <- mean((.$equity - predictions) ^ 2)
-      rsquared <- summary(model)$r.squared
-      data.frame(entrySignal = unique(.$entrySignal), mse = mse, rsquared = rsquared)
-    })
+  if (!is.null(equity_by_signal)) {
+    linearity_metrics <- equity_by_signal %>% 
+      group_by(entrySignal) %>% 
+      do({
+        model <- lm(equity ~ as.numeric(entryTime), data = .)
+        predictions <- predict(model, newdata = .)
+        mse <- mean((.$equity - predictions) ^ 2)
+        rsquared <- summary(model)$r.squared
+        data.frame(entrySignal = unique(.$entrySignal), mse = mse, rsquared = rsquared)
+      })
+  } else {
+    linearity_metrics <- data.frame(entrySignal = character(), mse = numeric(), rsquared = numeric())
+  }
   
   overall_model <- lm(equity ~ as.numeric(entryTime), data = overall_equity)
   overall_predictions <- predict(overall_model, newdata = overall_equity)
@@ -78,19 +83,19 @@ plot_equity_lines <- function(equity_by_signal, overall_equity) {
 # Function to plot boxplots
 plot_boxplots <- function(data) {
   p1 <- ggplot(data, aes(x = entrySignal, y = profit)) + 
-    geom_boxplot() + 
+    geom_boxplot(na.rm = TRUE) + 
     labs(title = "Profit by Entry Signal", x = "Entry Signal", y = "Profit")
   
   p2 <- ggplot(data, aes(x = exitSignal, y = profit)) + 
-    geom_boxplot() + 
+    geom_boxplot(na.rm = TRUE) + 
     labs(title = "Profit by Exit Signal", x = "Exit Signal", y = "Profit")
   
   p3 <- ggplot(data, aes(x = entrySignal, y = duration)) + 
-    geom_boxplot() + 
+    geom_boxplot(na.rm = TRUE) + 
     labs(title = "Duration by Entry Signal", x = "Entry Signal", y = "Duration (weeks)")
   
   p4 <- ggplot(data, aes(x = exitSignal, y = duration)) + 
-    geom_boxplot() + 
+    geom_boxplot(na.rm = TRUE) + 
     labs(title = "Duration by Exit Signal", x = "Exit Signal", y = "Duration (weeks)")
   
   return(list(p1 = p1, p2 = p2, p3 = p3, p4 = p4))
@@ -105,6 +110,34 @@ plot_all_strategies <- function(all_equity_lines) {
          x = "Entry Time",
          y = "Equity")
   return(plot)
+}
+
+# Function to compute key metrics
+compute_key_metrics <- function(data, equity_lines, linearity_metrics) {
+  net_profit <- sum(data$profit)
+  max_cumulative_drawdown <- min(equity_lines$equity - cummax(equity_lines$equity))
+  return_on_drawdown <- net_profit / abs(max_cumulative_drawdown)
+  num_trades <- nrow(data)
+  avg_trade <- mean(data$profit)
+  percent_profitable <- mean(data$profit>0)
+  start_date <- min(data$entryTime)
+  end_date <- max(data$exitTime)
+  mse <- linearity_metrics$mse
+  rsquared <- linearity_metrics$rsquared
+  
+  metrics <- data.frame(
+    net_profit = net_profit,
+    max_cumulative_drawdown = max_cumulative_drawdown,
+    return_on_drawdown = return_on_drawdown,
+    num_trades = num_trades,
+    avg_trade = avg_trade,
+    percent_profitable = percent_profitable,
+    start_date = start_date,
+    end_date = end_date,
+    mse = mse,
+    rsquared = rsquared
+  )
+  return(metrics)
 }
 
 # Shiny UI
@@ -130,7 +163,8 @@ ui <- fluidPage(
                  selectInput("selected_file3", "Select File", choices = NULL),
                  tableOutput("linearityTable")),
         tabPanel("Strategy Comparison",
-                 plotOutput("allStrategiesPlot"))
+                 plotOutput("allStrategiesPlot"),
+                 tableOutput("strategyComparisonTable"))
       )
     ),
     mainPanel()
@@ -176,7 +210,9 @@ server <- function(input, output, session) {
         uploaded_files$data[[name]] <- NULL
         uploaded_files$data <- uploaded_files$data[!sapply(uploaded_files$data, is.null)]
         updateSelectInput(session, "selected_file", choices = names(uploaded_files$data))
-        updateSelectInput(session, "selected_file2", choices = names(uploaded_files$data))
+        updateSelectInput(session, "selected_file2",
+
+ choices = names(uploaded_files$data))
         updateSelectInput(session, "selected_file3", choices = names(uploaded_files$data))
       })
     })
@@ -232,6 +268,17 @@ server <- function(input, output, session) {
     })
   })
   
+  all_metrics <- reactive({
+    lapply(names(uploaded_files$data), function(strategy) {
+      data <- uploaded_files$data[[strategy]]
+      equity <- compute_equity_lines(compute_metrics(data))$overall_equity
+      linearity <- compute_linearity_metrics(equity_by_signal = NULL, overall_equity = equity)
+      metrics <- compute_key_metrics(data, equity, linearity)
+      metrics <- cbind(strategy = strategy, metrics)
+      return(metrics)
+    }) %>% bind_rows()
+  })
+  
   output$equityPlot <- renderPlot({
     equity_data <- equity_lines()
     plot_equity_lines(equity_data$equity_by_signal, equity_data$overall_equity)
@@ -263,6 +310,10 @@ server <- function(input, output, session) {
   
   output$allStrategiesPlot <- renderPlot({
     plot_all_strategies(all_equity_lines())
+  })
+  
+  output$strategyComparisonTable <- renderTable({
+    all_metrics()
   })
 }
 
